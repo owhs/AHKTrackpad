@@ -50,9 +50,8 @@ class TrackpadManager {
         this.Handlers.Push({Type: "Pan", Fingers: fingers, OnDown: onDown, OnMove: onMove, OnUp: onUp, Apps: targetApps, Condition: condition, Divisor: divisor})
     }
 
-    ; [NEW] 'clicks' parameter added. 1 = Single Tap, 2 = Double Tap, etc.
-    OnTap(fingers, clicks, onTrigger, targetApps := "*", condition := "") {
-        this.Handlers.Push({Type: "Tap", Fingers: fingers, Clicks: clicks, OnTrigger: onTrigger, Apps: targetApps, Condition: condition})
+    OnTap(fingers, clicks, onTrigger, targetApps := "*", condition := "", maxDist := 0) {
+        this.Handlers.Push({Type: "Tap", Fingers: fingers, Clicks: clicks, OnTrigger: onTrigger, Apps: targetApps, Condition: condition, MaxDist: maxDist})
     }
 
     OnHold(fingers, onTrigger, timeMs := 500, targetApps := "*", condition := "") {
@@ -161,12 +160,14 @@ class TrackpadManager {
                     this.StartTracking(x, y)
                 }
             }
-            else if (countByte != this.CurrentFingers) {
-                this.CurrentFingers := countByte
-                this.StartTracking(x, y)
-            } 
             else {
-                this.UpdateTracking(x, y)
+                if (countByte > this.CurrentFingers) {
+                    this.CurrentFingers := countByte
+                    this.StartTracking(x, y)
+                } 
+                else {
+                    this.UpdateTracking(x, y)
+                }
             }
             
             this.LastFingers := countByte
@@ -174,7 +175,7 @@ class TrackpadManager {
         else if (countByte == 0 || state == 1) {
             this.LastFingers := countByte
             if (this.IsTracking) {
-                SetTimer(this.DebounceTimer, -60)
+                SetTimer(this.DebounceTimer, -80)
             }
         }
     }
@@ -187,6 +188,25 @@ class TrackpadManager {
         }
 
         this.ActiveHandlers := this.FindMatchingHandlers(this.CurrentFingers)
+        
+        ; Priority System: If a Pan/Scroll matched the current app, suppress Swipes.
+        hasPan := false
+        for handler in this.ActiveHandlers {
+            if (handler.Type == "Pan") {
+                hasPan := true
+                break
+            }
+        }
+        
+        if (hasPan) {
+            filteredHandlers := []
+            for handler in this.ActiveHandlers {
+                if (handler.Type != "Swipe") {
+                    filteredHandlers.Push(handler)
+                }
+            }
+            this.ActiveHandlers := filteredHandlers
+        }
 
         this.IsTracking := true
         this.MaxFingers := this.CurrentFingers
@@ -294,10 +314,9 @@ class TrackpadManager {
         }
 
         isTap := false
-        ; Very forgiving distance threshold so firm taps don't fail as swipes
-        maxD := this.MaxFingers * 20 
+        maxD := this.MaxFingers * 25 
         
-        if (!this.HasMoved && duration < 250 && this.MaxDist < maxD) {
+        if (!this.HasTriggeredSwipe && duration < 350 && this.MaxDist < maxD) {
             isTap := true
         }
 
@@ -312,13 +331,11 @@ class TrackpadManager {
             }
             
             if (maxClicksBound > 0) {
-                ; Zero lag for single taps
                 if (maxClicksBound == 1) {
                     this.TapFingers := this.MaxFingers
                     this.TapCount := 1
                     this.ExecuteTap()
                 } else {
-                    ; Wait for potential multi-taps
                     if (this.MaxFingers == this.TapFingers && (A_TickCount - this.LastTapTime) < 350) {
                         this.TapCount++
                     } else {
@@ -354,7 +371,6 @@ class TrackpadManager {
         }
 
         matched := false
-        ; Prioritize exact matches (e.g. they bound a Double Tap)
         for handler in this.Handlers {
             if (handler.Type == "Tap" && handler.Fingers == f && handler.Clicks == c) {
                 if (this.MatchesApp(handler.Apps, activeExe) && this.EvaluateCondition(handler.Condition)) {
@@ -365,7 +381,6 @@ class TrackpadManager {
             }
         }
         
-        ; Fallback: If they double tapped but only a single tap is bound, fire the single tap twice.
         if (!matched && c > 1) {
             for handler in this.Handlers {
                 if (handler.Type == "Tap" && handler.Fingers == f && handler.Clicks == 1) {
