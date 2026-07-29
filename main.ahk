@@ -10,24 +10,20 @@ global TP := TrackpadManager()
 ; ===================================================================
 
 IsAltTabOpen() {
-    ; Catches the Alt-Tab UI grid in Windows 10 & 11
     return WinActive("ahk_class MultitaskingViewFrame") || WinActive("ahk_class TaskSwitcherWnd") || WinActive("ahk_class XamlExplorerHostIslandWindow")
 }
 
-AltTabNav(direction) {
-    if (!IsAltTabOpen()) {
-        Send("^!{Tab}") ; Open Sticky Alt-Tab
-        Sleep(80)       ; Brief pause to let Windows UI appear
-        Send("{" direction "}")
-    } else {
-        Send("{" direction "}")
-    }
-}
+; When Alt-Tab IS open -> Navigate the menu grid
+TP.OnSwipe(4, "Left",  () => Send("{Left}"),  "*", IsAltTabOpen)
+TP.OnSwipe(4, "Right", () => Send("{Right}"), "*", IsAltTabOpen)
+TP.OnSwipe(4, "Up",    () => Send("{Up}"),    "*", IsAltTabOpen)
+TP.OnSwipe(4, "Down",  () => Send("{Down}"),  "*", IsAltTabOpen)
 
-TP.OnSwipe(4, "Left",  () => AltTabNav("Left"))
-TP.OnSwipe(4, "Right", () => AltTabNav("Right"))
-TP.OnSwipe(4, "Up",    () => AltTabNav("Up"))
-TP.OnSwipe(4, "Down",  () => AltTabNav("Down"))
+; When Alt-Tab IS NOT open -> Open it (Left/Right) or trigger Windows commands (Up/Down)
+TP.OnSwipe(4, "Left",  () => Send("^!{Tab}" ), "*", () => !IsAltTabOpen())
+TP.OnSwipe(4, "Right", () => Send("^!{Tab}" ), "*", () => !IsAltTabOpen())
+TP.OnSwipe(4, "Up",    () => Send("{LWin}"  ), "*", () => !IsAltTabOpen())
+;TP.OnSwipe(4, "Down",  () => Send("{Escape}"), "*", () => !IsAltTabOpen())
 
 ; 4-Finger Tap -> Press Enter (to select the window you swiped to)
 TP.OnTap(4, 1, () => Send("{Enter}"), "*", IsAltTabOpen)
@@ -41,16 +37,16 @@ TP.OnTap(4, 1, () => Send("{Enter}"), "*", IsAltTabOpen)
 ; ===================================================================
 
 ; 3-Finger Single Tap -> Middle Click (Opens links instantly in new tabs)
-;TP.OnTap(3, 1, () => Send("{MButton}"))
+TP.OnTap(3, 1, () => Send("{MButton}"))
 
 ; 3-Finger Double Tap -> Closes current tab
-;TP.OnTap(3, 2, () => Send("^w"))
+; TP.OnTap(3, 2, () => Send("^w"))
 
 ; 4-Finger Single Tap (when Alt-Tab isn't open) -> Play / Pause music
 TP.OnTap(4, 1, () => Send("{Media_Play_Pause}"), "*", () => !IsAltTabOpen())
 
 ; 4-Finger Hold (0.6 seconds) -> Opens Task Manager
-;TP.OnHold(4, () => Send("^+{Esc}"), 600)
+TP.OnHold(4, () => Send("^+{Esc}"), 600)
 
 
 ; ===================================================================
@@ -63,8 +59,8 @@ TP.OnSwipe(3, "Left",  () => Send("!{Left}"), Browsers)
 TP.OnSwipe(3, "Right", () => Send("!{Right}"), Browsers)
 
 ; Global Volume Control (Up / Down)
-TP.OnSwipe(3, "Up",   () => Send("{Volume_Up 2}"), Browsers)
-TP.OnSwipe(3, "Down", () => Send("{Volume_Down 2}"), Browsers)
+TP.OnSwipe(3, "Up",   () => Send("{Volume_Up 2}"))
+TP.OnSwipe(3, "Down", () => Send("{Volume_Down 2}"))
 
 
 ; ===================================================================
@@ -73,11 +69,11 @@ TP.OnSwipe(3, "Down", () => Send("{Volume_Down 2}"), Browsers)
 
 ; 3-Finger Pan -> Middle-Click Drag
 ; This is extremely useful for CAD, Blender, or navigating large canvases.
-CadApps := ["acad.exe", "cadmate.exe", "gcad.exe", "blender.exe", "figma.exe"]
-TP.OnMiddlePan(3, CadApps, "", 6) 
+PanApps := ["acad.exe", "cadmate.exe", "gcad.exe", "blender.exe", "figma.exe"]
+TP.OnMiddlePan(3, PanApps, "", 6) 
 
 ; ===================================================================
-; 5. PINCH TO ZOOM OVERRIDES
+; 4. PINCH TO ZOOM OVERRIDES
 ; ===================================================================
 
 ZoomIn() {
@@ -89,5 +85,5 @@ ZoomOut() {
 }
 
 ; Force standard Ctrl+ / Ctrl- in specific apps instead of Ctrl+ScrollWheel
-GraphicApps := ["notepad.exe", "notepad++.exe"]
-TP.OnPinch(ZoomIn, ZoomOut, GraphicApps)
+PinchApps := ["notepad.exe", "notepad++.exe"]
+TP.OnPinch(ZoomIn, ZoomOut, PinchApps)
