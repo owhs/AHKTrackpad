@@ -1,89 +1,106 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 Persistent()
+; ============================================================================
+;  Touchpad gestures
+; ----------------------------------------------------------------------------
+;  What your fingers do:
+;
+;    4 fingers  swipe left / right   open the app switcher, then move through it
+;               swipe up             Start menu
+;               tap                  pick the app in the switcher (else play / pause)
+;               hold                 Task Manager
+;    3 fingers  tap                  middle click (open a link in a new tab)
+;               swipe left / right   back / forward in a browser
+;               swipe up / down      volume
+;               drag                 middle-drag in CAD / Blender / Figma
+;    pinch                           zoom in Notepad / Notepad++
+;
+;  The tray icon: pause gestures, open the calibrator, edit this file, reload.
+;  Change a gesture below, save, and choose "Reload" from the tray.
+; ============================================================================
 
 #Include TrackpadLib.ahk
 global TP := TrackpadManager()
 
-; ===================================================================
-; 1. SMART ALT-TAB NAVIGATION (4-FINGER SWIPES)
-; ===================================================================
+; ---------------------------------------------------------------- how it feels
+; The same timings the calibrator uses, so what works there works here.
+TP.MaxTapDuration := 450        ; a tap is a touch shorter than this (ms)
+HoldMs := 800                   ; a hold is a touch still for this long (ms): keep it well above MaxTapDuration
+; TP.WatchdogMs := 150          ; raise to 250 if a hold ever ends by itself
+; TP.TapDistancePerFinger := 55 ; raise if taps get missed because your fingers drift
 
+; ---------------------------------------------------------------- 4 fingers: app switching
 IsAltTabOpen() {
     return WinActive("ahk_class MultitaskingViewFrame") || WinActive("ahk_class TaskSwitcherWnd") || WinActive("ahk_class XamlExplorerHostIslandWindow")
 }
+NotAltTab() => !IsAltTabOpen()
 
-; When Alt-Tab IS open -> Navigate the menu grid
+; in the switcher: move through it, tap to pick
 TP.OnSwipe(4, "Left",  () => Send("{Left}"),  "*", IsAltTabOpen)
 TP.OnSwipe(4, "Right", () => Send("{Right}"), "*", IsAltTabOpen)
 TP.OnSwipe(4, "Up",    () => Send("{Up}"),    "*", IsAltTabOpen)
 TP.OnSwipe(4, "Down",  () => Send("{Down}"),  "*", IsAltTabOpen)
-
-; When Alt-Tab IS NOT open -> Open it (Left/Right) or trigger Windows commands (Up/Down)
-TP.OnSwipe(4, "Left",  () => Send("^!{Tab}" ), "*", () => !IsAltTabOpen())
-TP.OnSwipe(4, "Right", () => Send("^!{Tab}" ), "*", () => !IsAltTabOpen())
-TP.OnSwipe(4, "Up",    () => Send("{LWin}"  ), "*", () => !IsAltTabOpen())
-;TP.OnSwipe(4, "Down",  () => Send("{Escape}"), "*", () => !IsAltTabOpen())
-
-; 4-Finger Tap -> Press Enter (to select the window you swiped to)
 TP.OnTap(4, 1, () => Send("{Enter}"), "*", IsAltTabOpen)
 
-; 4-Finger Double Tap -> Press Escape (to cancel Alt-Tab)
-;TP.OnTap(4, 2, () => Send("{Esc}"), "*", IsAltTabOpen)
+; anywhere else: open the switcher, Start menu, play / pause, Task Manager
+TP.OnSwipe(4, "Left",  () => Send("^!{Tab}"), "*", NotAltTab)
+TP.OnSwipe(4, "Right", () => Send("^!{Tab}"), "*", NotAltTab)
+TP.OnSwipe(4, "Up",    () => Send("{LWin}"),  "*", NotAltTab)
+TP.OnTap(4, 1, () => Send("{Media_Play_Pause}"), "*", NotAltTab)
+TP.OnHold(4, () => Send("^+{Esc}"), HoldMs)
 
-
-; ===================================================================
-; 2. TAPS & HOLDS (MIDDLE CLICK & MULTI-TAPS)
-; ===================================================================
-
-; 3-Finger Single Tap -> Middle Click (Opens links instantly in new tabs)
+; ---------------------------------------------------------------- 3 fingers
 TP.OnTap(3, 1, () => Send("{MButton}"))
 
-; 3-Finger Double Tap -> Closes current tab
-; TP.OnTap(3, 2, () => Send("^w"))
-
-; 4-Finger Single Tap (when Alt-Tab isn't open) -> Play / Pause music
-TP.OnTap(4, 1, () => Send("{Media_Play_Pause}"), "*", () => !IsAltTabOpen())
-
-; 4-Finger Hold (0.6 seconds) -> Opens Task Manager
-TP.OnHold(4, () => Send("^+{Esc}"), 600)
-
-
-; ===================================================================
-; 3. BROWSER & MEDIA (3-FINGER SWIPES)
-; ===================================================================
-
-; Browser Navigation (Forward/Backwards)
 Browsers := ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe"]
-TP.OnSwipe(3, "Left",  () => Send("!{Left}"), Browsers)
+TP.OnSwipe(3, "Left",  () => Send("!{Left}"),  Browsers)
 TP.OnSwipe(3, "Right", () => Send("!{Right}"), Browsers)
 
-; Global Volume Control (Up / Down)
 TP.OnSwipe(3, "Up",   () => Send("{Volume_Up 2}"))
 TP.OnSwipe(3, "Down", () => Send("{Volume_Down 2}"))
 
-
-; ===================================================================
-; 4. ADVANCED PANNING & SCROLLING
-; ===================================================================
-
-; 3-Finger Pan -> Middle-Click Drag
-; This is extremely useful for CAD, Blender, or navigating large canvases.
 PanApps := ["acad.exe", "cadmate.exe", "gcad.exe", "blender.exe", "figma.exe"]
-TP.OnMiddlePan(3, PanApps, "", 6) 
+TP.OnMiddlePan(3, PanApps, "", 5)
 
-; ===================================================================
-; 4. PINCH TO ZOOM OVERRIDES
-; ===================================================================
-
-ZoomIn() {
-    Send("^{NumpadAdd}")
-}
-
-ZoomOut() {
-    Send("^{NumpadSub}")
-}
-
-; Force standard Ctrl+ / Ctrl- in specific apps instead of Ctrl+ScrollWheel
+; ---------------------------------------------------------------- pinch
 PinchApps := ["notepad.exe", "notepad++.exe"]
-TP.OnPinch(ZoomIn, ZoomOut, PinchApps)
+TP.OnPinch(() => Send("^{NumpadAdd}"), () => Send("^{NumpadSub}"), PinchApps)
+
+; ---------------------------------------------------------------- tray
+Tray()
+Tray() {
+    A_IconTip := "Touchpad gestures"
+    m := A_TrayMenu
+    m.Delete()
+    m.Add("Pause gestures", TogglePause)
+    m.Add()
+    m.Add("Calibrator (test and tune)", OpenCalibrator)
+    m.Add("Edit gestures", (*) => Edit())
+    m.Add("Reload", (*) => Reload())
+    m.Add()
+    m.Add("Quit", (*) => ExitApp())
+    m.Default := "Pause gestures"
+    m.ClickCount := 1
+}
+TogglePause(name, *) {
+    paused := TP.Pause()
+    A_TrayMenu.Rename(name, paused ? "Resume gestures" : "Pause gestures")
+    A_IconTip := "Touchpad gestures" (paused ? " (paused)" : "")
+    ToolTip(paused ? "Gestures paused" : "Gestures on")
+    SetTimer(() => ToolTip(), -1200)
+}
+; while the calibrator is open these gestures step aside, so testing there doesn't send keys here
+OpenCalibrator(*) {
+    was := TP.Enabled
+    TP.Pause(true)
+    Run('"' A_AhkPath '" "' A_ScriptDir '\TrackpadCalibrator.ahk"', , , &pid)
+    SetTimer(WaitClosed, 1000)
+    WaitClosed() {
+        if ProcessExist(pid)
+            return
+        SetTimer(WaitClosed, 0)
+        if was
+            TP.Pause(false)
+    }
+}
