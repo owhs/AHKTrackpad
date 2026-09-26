@@ -532,7 +532,7 @@ class TrackpadManager {
             return ""
         }
         buf := Buffer(byteLen, 0)
-        status := DllCall("hid.dll\HidP_GetUsageValueArray", "Int", 0, "UShort", usagePage, "UShort", linkCollection
+        status := DllCall(TrackpadManager.HidFn("HidP_GetUsageValueArray"), "Int", 0, "UShort", usagePage, "UShort", linkCollection
             , "UShort", usage, "Ptr", buf.Ptr, "UShort", byteLen, "Ptr", preparsedPtr, "Ptr", subPtr, "UInt", dwSizeHid, "Int")
         return (status = 0x00110000) ? buf : ""
     }
@@ -556,21 +556,35 @@ class TrackpadManager {
     ; ===================================================================
     ; HARDWARE ENGINE - live parsing
     ; ===================================================================
+    ; hid.dll functions by address: DllCall("hid.dll\Name") looks the name up on
+    ; every call, and the per-report path makes a few per finger
+    static HidFn(name) {
+        static fns := Map()
+        if !fns.Has(name)
+            fns[name] := DllCall("GetProcAddress", "Ptr", DllCall("LoadLibrary", "Str", "hid.dll", "Ptr"), "AStr", name, "Ptr")
+        return fns[name]
+    }
+    OnFrame := ""
     OnRawInput(wParam, lParam, msg, hwnd) {
         Critical
         if !this.Enabled
             return
         this.ReportCount += 1               ; for a reports-per-second readout (the calibrator, Reach)
         static headerSize := A_PtrSize = 8 ? 24 : 16
-        size := 0
-        DllCall("GetRawInputData", "Ptr", lParam, "UInt", 0x10000003, "Ptr", 0, "UIntP", &size, "UInt", headerSize)
-
-        if (!size) {
-            return
-        }
-        rawBuf := Buffer(size, 0)
-        if (DllCall("GetRawInputData", "Ptr", lParam, "UInt", 0x10000003, "Ptr", rawBuf, "UIntP", &size, "UInt", headerSize) != size) {
-            return
+        ; One buffer for every report (a 4-finger touch sends ~600 a second,
+        ; and this runs for each): read straight into it, and only ask the
+        ; size -- and grow it -- when a report does not fit.
+        static rawBuf := Buffer(1024, 0)
+        static pGRID := DllCall("GetProcAddress", "Ptr", DllCall("GetModuleHandle", "Str", "user32", "Ptr"), "AStr", "GetRawInputData", "Ptr")
+        size := rawBuf.Size
+        if (DllCall(pGRID, "Ptr", lParam, "UInt", 0x10000003, "Ptr", rawBuf, "UIntP", &size, "UInt", headerSize, "UInt") = 0xFFFFFFFF) {
+            size := 0
+            DllCall(pGRID, "Ptr", lParam, "UInt", 0x10000003, "Ptr", 0, "UIntP", &size, "UInt", headerSize)
+            if (!size)
+                return
+            rawBuf := Buffer(size, 0)
+            if (DllCall(pGRID, "Ptr", lParam, "UInt", 0x10000003, "Ptr", rawBuf, "UIntP", &size, "UInt", headerSize, "UInt") != size)
+                return
         }
 
         if (NumGet(rawBuf, 0, "UInt") != 2) {   ; RIM_TYPEHID
@@ -624,11 +638,13 @@ class TrackpadManager {
             this.ReadContacts(layout, subPtr, dwSizeHid)
         }
         this.ReportContacts()
+        if (this.OnFrame)                   ; a live view (Reach's touchpad page): after every report, it throttles itself
+            this.OnFrame.Call()
     }
     ReadContacts(layout, subPtr, len) {
         ppd := layout.PreparsedData.Ptr, now := A_TickCount
         cVal := 0
-        DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x0D, "UShort", layout.CountLinkCollection
+        DllCall(TrackpadManager.HidFn("HidP_GetUsageValue"), "Int", 0, "UShort", 0x0D, "UShort", layout.CountLinkCollection
             , "UShort", 0x54, "UIntP", &cVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int")
         raw := IsObject(this.RawLog) && this.RawLog.Length < this.RawLogMax
         line := raw ? Format("{:6}ms count={}", A_TickCount - this.RawStart, cVal) : ""
@@ -665,12 +681,12 @@ class TrackpadManager {
             } else {
                 this.FrameLeft--
                 xVal := 0, yVal := 0, idVal := 0
-                sx := DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x01, "UShort", fc.LinkCollection
+                sx := DllCall(TrackpadManager.HidFn("HidP_GetUsageValue"), "Int", 0, "UShort", 0x01, "UShort", fc.LinkCollection
                     , "UShort", 0x30, "UIntP", &xVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int")
-                sy := DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x01, "UShort", fc.LinkCollection
+                sy := DllCall(TrackpadManager.HidFn("HidP_GetUsageValue"), "Int", 0, "UShort", 0x01, "UShort", fc.LinkCollection
                     , "UShort", 0x31, "UIntP", &yVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int")
                 id := "lc" fc.LinkCollection
-                if (fc.IdBits && DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x0D, "UShort", fc.LinkCollection
+                if (fc.IdBits && DllCall(TrackpadManager.HidFn("HidP_GetUsageValue"), "Int", 0, "UShort", 0x0D, "UShort", fc.LinkCollection
                         , "UShort", 0x51, "UIntP", &idVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int") = 0x00110000)
                     id := idVal
                 tip := !fc.HasTip || this.TipDown(ppd, fc.LinkCollection, subPtr, len)
@@ -690,7 +706,7 @@ class TrackpadManager {
     TipDown(ppd, lc, subPtr, len) {
         static list := Buffer(64, 0)
         n := 32
-        if (DllCall("hid.dll\HidP_GetUsages", "Int", 0, "UShort", 0x0D, "UShort", lc, "Ptr", list, "UIntP", &n
+        if (DllCall(TrackpadManager.HidFn("HidP_GetUsages"), "Int", 0, "UShort", 0x0D, "UShort", lc, "Ptr", list, "UIntP", &n
                 , "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int") != 0x00110000)
             return true
         Loop n
