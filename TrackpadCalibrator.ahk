@@ -52,6 +52,7 @@ Steps := [
 ]
 StepIndex := 0
 StepResults := []
+RawText := ""
 PendingExpectation := ""
 
 ; ---------------------------------------------------------------------------
@@ -96,14 +97,16 @@ StatusText := CalGui.AddText("w640 r1", "Tracking: no")
 CalGui.AddText("w640 cBlue", "3) Guided test")
 InstructionText := CalGui.AddText("w640 r1 cGreen", "Click 'Start Guided Test' and follow the prompts below.")
 BtnGuided := CalGui.AddButton("w220", "Start Guided Test")
+BtnRaw := CalGui.AddButton("w260 x+10", "Record raw touches (5 seconds)")
 
 CalGui.AddText("w640 cBlue", "Event log")
-LogEditCtrl := CalGui.AddEdit("w640 r12 ReadOnly -Wrap")
+LogEditCtrl := CalGui.AddEdit("xm w640 r12 ReadOnly -Wrap")
 BtnClear := CalGui.AddButton("w150", "Clear Log")
 BtnCopy := CalGui.AddButton("w150 x+10", "Copy Report")
 
 BtnScan.OnEvent("Click", ShowDeviceInfo)
 BtnGuided.OnEvent("Click", StartGuidedTest)
+BtnRaw.OnEvent("Click", RecordRaw)
 BtnClear.OnEvent("Click", ClearLog)
 BtnCopy.OnEvent("Click", CopyReport)
 CalGui.OnEvent("Close", (*) => ExitApp())
@@ -175,7 +178,7 @@ ShowDeviceInfo(*) {
                 if (fc.Mode = "array") {
                     out .= "  Finger field: PACKED ARRAY, " . fc.Count . " contacts in one field (LinkCollection " . fc.LinkCollection . ")`r`n"
                 } else {
-                    out .= "  Finger field: single contact (LinkCollection " . fc.LinkCollection . ")`r`n"
+                    out .= "  Finger field: single contact (LinkCollection " . fc.LinkCollection . (fc.HasTip ? ", tip switch" : "") . (fc.IdBits ? ", contact id" : "") . ")`r`n"
                 }
             }
             out .= "  X logical range: " . layout.LogicalMinX . " to " . layout.LogicalMaxX . "`r`n"
@@ -245,9 +248,26 @@ FinishGuidedTest() {
     }
 }
 
+; Every report the pad sends for 5 seconds (count, and each finger's id and position), for
+; working out why a gesture isn't recognised on a pad we don't have. Copy Report includes it.
+RecordRaw(*) {
+    global TP
+    TP.RawLog := [], TP.RawStart := A_TickCount
+    Log("--- Recording raw touches for 5 seconds: do the gesture that isn't recognised (a 3-finger swipe, say) a few times ---")
+    SetTimer(StopRaw, -5000)
+}
+StopRaw() {
+    global TP, RawText
+    lines := TP.RawLog, TP.RawLog := ""
+    RawText := "`r`n=== Raw touches (" . lines.Length . " reports) ===`r`n"
+    for l in lines
+        RawText .= l . "`r`n"
+    Log("--- Recorded " . lines.Length . " reports. Copy Report includes them ---")
+}
+
 CopyReport(*) {
-    global TP, DiagBox, LogEditCtrl
-    report := "=== TrackpadCalibrator report ===`r`n`r`n" . DiagBox.Text . "`r`n=== Event log ===`r`n" . LogEditCtrl.Text
+    global TP, DiagBox, LogEditCtrl, RawText
+    report := "=== TrackpadCalibrator report ===`r`n`r`n" . DiagBox.Text . "`r`n=== Event log ===`r`n" . LogEditCtrl.Text . RawText
     A_Clipboard := report
     MsgBox("Report copied to clipboard.", "Trackpad Calibrator")
 }

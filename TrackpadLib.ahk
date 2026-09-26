@@ -144,6 +144,24 @@ class TrackpadManager {
         this.Contacts := Map()
         this.ContactStaleMs := 60
         this.FrameLeft := 0
+        ; Fingers rarely land at the same instant: many pads report 2 fingers, then 3,
+        ; a few reports later. A touch that gains fingers within FingerSettleMs of
+        ; starting keeps its starting point (and so the movement made so far) instead
+        ; of starting over with the new count - otherwise a quick 3-finger swipe whose
+        ; third finger shows up late looks like a short 3-finger tap.
+        this.FingerSettleMs := 250
+        ; A quick swipe that ends before reaching its threshold still counts on release
+        ; if it covered this share of it (and was fast: under FlickMs).
+        this.FlickRatio := 0.55
+        this.FlickMs := 450
+        ; The hand's position moves by the fingers' own movement (matched by Contact
+        ; ID from report to report), so a finger landing or lifting never makes the
+        ; position jump. HandX/HandY: that position; Seq: reports so far.
+        this.MinSinceLift := 99
+        this.HandX := 0, this.HandY := 0, this.HandDown := false, this.Seq := 0, this.FrameBroken := false
+        ; Set to an Array to record every report's contacts (the calibrator's
+        ; "Record raw touches"): one line per report, at most RawLogMax.
+        this.RawLog := "", this.RawLogMax := 8000, this.RawStart := 0
 
         this.Devices := Map()          ; hDevice -> detected layout info
         this.WarnedDevices := Map()    ; hDevice -> true once we've warned about it
@@ -433,6 +451,23 @@ class TrackpadManager {
                 }
             }
 
+            ; Tip Switch (Digitizer 0x42) per finger collection: a finger lifting is reported
+            ; once more with it off, and must not count as touching
+            tipColls := Map()
+            if (nb := NumGet(capsBuf, 46, "UShort")) {
+                bcBuf := Buffer(72 * nb, 0), bcLen := nb
+                if (DllCall("hid.dll\HidP_GetButtonCaps", "Int", 0, "Ptr", bcBuf.Ptr, "UShortP", &bcLen, "Ptr", ppd.Ptr, "Int") = 0x00110000) {
+                    Loop bcLen {
+                        base := (A_Index - 1) * 72
+                        if (NumGet(bcBuf, base, "UShort") != 0x0D)
+                            continue
+                        u1 := NumGet(bcBuf, base + 56, "UShort"), u2 := NumGet(bcBuf, base + 12, "UChar") ? NumGet(bcBuf, base + 58, "UShort") : u1
+                        if (u1 <= 0x42 && 0x42 <= u2)
+                            tipColls[NumGet(bcBuf, base + 6, "UShort")] := true
+                    }
+                }
+            }
+
             fingerCollections := []
             for xe in xEntries {
                 if (!yEntries.Has(xe.LinkCollection)) {
@@ -447,7 +482,8 @@ class TrackpadManager {
                     , Count: count, BitSizeX: xe.BitSize, BitSizeY: ye.BitSize
                     , LogicalMinX: xe.LogicalMinX, LogicalMaxX: xe.LogicalMaxX
                     , LogicalMinY: ye.LogicalMinY, LogicalMaxY: ye.LogicalMaxY
-                    , IdBits: idEntries.Has(xe.LinkCollection) ? idEntries[xe.LinkCollection] : 0})
+                    , IdBits: idEntries.Has(xe.LinkCollection) ? idEntries[xe.LinkCollection] : 0
+                    , HasTip: count = 1 && tipColls.Has(xe.LinkCollection)})
                 if (layout.ReportID = 0) {
                     layout.ReportID := xe.ReportID
                 }
@@ -580,6 +616,7 @@ class TrackpadManager {
         ; works whether the pad sends a frame as one report or one report per finger
         ; (only the first of those carries Contact Count), and the position no longer
         ; jumps when a different finger happens to come first.
+        this.Seq += 1
         Loop dwCount {
             subPtr := pRawData + (A_Index - 1) * dwSizeHid
             if (layout.ReportID != 0 && NumGet(subPtr, 0, "UChar") != layout.ReportID)
@@ -593,10 +630,16 @@ class TrackpadManager {
         cVal := 0
         DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x0D, "UShort", layout.CountLinkCollection
             , "UShort", 0x54, "UIntP", &cVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int")
+        raw := IsObject(this.RawLog) && this.RawLog.Length < this.RawLogMax
+        line := raw ? Format("{:6}ms count={}", A_TickCount - this.RawStart, cVal) : ""
         if (cVal > 0) {
+            if (this.FrameLeft > 0)
+                this.FrameBroken := true        ; frames that never deliver all their contacts: don't wait for the rest
             this.FrameLeft := cVal              ; a new frame: this many contacts follow
         } else if (this.FrameLeft <= 0) {
             this.Contacts.Clear()               ; a frame of its own saying "no contacts"
+            if raw
+                this.RawLog.Push(line " (no contacts)")
             return
         }
         for fc in layout.FingerCollections {
@@ -614,7 +657,10 @@ class TrackpadManager {
                     this.FrameLeft--
                     idx := A_Index - 1
                     id := idBuf != "" ? this.ExtractPackedValue(idBuf, idx, fc.IdBits) : "slot" idx
-                    this.SetContact(fc, id, this.ExtractPackedValue(xBuf, idx, fc.BitSizeX), this.ExtractPackedValue(yBuf, idx, fc.BitSizeY), now)
+                    xv := this.ExtractPackedValue(xBuf, idx, fc.BitSizeX), yv := this.ExtractPackedValue(yBuf, idx, fc.BitSizeY)
+                    if raw
+                        line .= " | #" id " " xv "," yv
+                    this.SetContact(fc, id, xv, yv, now)
                 }
             } else {
                 this.FrameLeft--
@@ -627,14 +673,39 @@ class TrackpadManager {
                 if (fc.IdBits && DllCall("hid.dll\HidP_GetUsageValue", "Int", 0, "UShort", 0x0D, "UShort", fc.LinkCollection
                         , "UShort", 0x51, "UIntP", &idVal, "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int") = 0x00110000)
                     id := idVal
-                if (sx = 0x00110000 && sy = 0x00110000)
+                tip := !fc.HasTip || this.TipDown(ppd, fc.LinkCollection, subPtr, len)
+                if raw
+                    line .= " | lc" fc.LinkCollection " #" id (sx = 0x00110000 && sy = 0x00110000 ? " " xVal "," yVal : " no x/y") (tip ? "" : " lifted")
+                if (!tip) {
+                    if this.Contacts.Has(id)
+                        this.Contacts.Delete(id)
+                } else if (sx = 0x00110000 && sy = 0x00110000)
                     this.SetContact(fc, id, xVal, yVal, now)
             }
         }
+        if raw
+            this.RawLog.Push(line)
+    }
+    ; is the finger in this collection touching? (its Tip Switch; true when the pad doesn't say)
+    TipDown(ppd, lc, subPtr, len) {
+        static list := Buffer(64, 0)
+        n := 32
+        if (DllCall("hid.dll\HidP_GetUsages", "Int", 0, "UShort", 0x0D, "UShort", lc, "Ptr", list, "UIntP", &n
+                , "Ptr", ppd, "Ptr", subPtr, "UInt", len, "Int") != 0x00110000)
+            return true
+        Loop n
+            if (NumGet(list, (A_Index - 1) * 2, "UShort") = 0x42)
+                return true
+        return false
     }
     SetContact(fc, id, xVal, yVal, now) {
-        this.Contacts[id] := {x: (xVal - fc.LogicalMinX) / (fc.LogicalMaxX - fc.LogicalMinX) * this.NormRange
-            , y: (yVal - fc.LogicalMinY) / (fc.LogicalMaxY - fc.LogicalMinY) * this.NormRange, t: now}
+        x := (xVal - fc.LogicalMinX) / (fc.LogicalMaxX - fc.LogicalMinX) * this.NormRange
+        y := (yVal - fc.LogicalMinY) / (fc.LogicalMaxY - fc.LogicalMinY) * this.NormRange
+        if (this.Contacts.Has(id) && now - this.Contacts[id].t <= 40) {   ; the same finger, still down
+            c := this.Contacts[id]
+            c.dx += x - c.x, c.dy += y - c.y, c.x := x, c.y := y, c.t := now, c.moved := true
+        } else
+            this.Contacts[id] := {x: x, y: y, t: now, dx: 0.0, dy: 0.0, moved: false}
     }
     ; the fingers still down (reported within ContactStaleMs), as one hand
     ReportContacts() {
@@ -646,16 +717,36 @@ class TrackpadManager {
             this.Contacts.Delete(id)
         n := this.Contacts.Count
         if (n = 0) {
+            this.HandDown := false
             this.ProcessData(1, 0, this.LastX, this.LastY)
             return
         }
-        x := 0.0, y := 0.0
+        if (this.FrameLeft > 0 && !this.FrameBroken)
+            return                              ; the rest of this frame is in the next report
+        x := 0.0, y := 0.0, mx := 0.0, my := 0.0, m := 0
         for id, c in this.Contacts {
-            if (this.TrackingMode = "single")
+            if (this.TrackingMode = "single") {
+                this.HandX := c.x, this.HandY := c.y, this.HandDown := true, c.dx := 0.0, c.dy := 0.0
                 return this.ProcessData(3, n, c.x, c.y)     ; the lowest contact id: always the same finger
+            }
             x += c.x, y += c.y
+            ; a finger's movement since the last report; a jump of a quarter of the pad is a glitch
+            if (c.moved && Abs(c.dx) + Abs(c.dy) < this.NormRange * 0.25)
+                mx += c.dx, my += c.dy, m += 1
+            c.dx := 0.0, c.dy := 0.0, c.moved := false
         }
-        this.ProcessData(3, n, x / n, y / n)
+        if (!this.HandDown)
+            this.HandX := x / n, this.HandY := y / n, this.HandDown := true
+        else if (m)
+            this.HandX += mx / m, this.HandY += my / m
+        if IsObject(this.RawLog)
+            this.Trace("n=" n " hand " Round(this.HandX) "," Round(this.HandY) " (" m " moved)")
+        this.ProcessData(3, n, this.HandX, this.HandY)
+    }
+    ; a line in the recording (RawLog), when one is being made
+    Trace(msg) {
+        if IsObject(this.RawLog) && this.RawLog.Length < this.RawLogMax
+            this.RawLog.Push(Format("{:6}ms     {}", A_TickCount - this.RawStart, msg))
     }
     ; Original hard-coded layout (Report ID 0x04, fixed byte offsets), kept
     ; only as an explicit opt-in fallback (TP.AllowLegacyFallback := true)
@@ -675,8 +766,22 @@ class TrackpadManager {
     }
     ProcessData(state, countByte, x, y) {
         if (countByte > 0 && state == 3) {
+            ; the fingers had (nearly) all lifted and are coming down again: that's a new touch
+            ; (a quick double tap), not more of the old one - even before the pad went quiet
+            if (this.IsTracking && countByte >= this.CurrentFingers && this.MinSinceLift <= Max(1, this.CurrentFingers - 2)) {
+                SetTimer(this.DebounceTimer, 0)
+                this.Trace("fingers back down after lifting: a new touch")
+                this.ReleaseFingers()
+                this.CurrentFingers := countByte     ; (the hand keeps its position: re-centring it here would look like a jump)
+                this.StartTracking(x, y)
+                this.LastFingers := countByte
+                return
+            }
+            if (this.IsTracking && countByte < this.CurrentFingers)
+                this.MinSinceLift := Min(this.MinSinceLift, countByte)
             SetTimer(this.DebounceTimer, 0)
-            this.LastActiveTick := A_TickCount
+            if (!this.IsTracking || countByte >= this.CurrentFingers)
+                this.LastActiveTick := A_TickCount     ; not while lifting, nor as the next touch lands: the touch's own end
             if (this.IsTracking && countByte > this.MaxFingers) {
                 this.MaxFingers := countByte
             }
@@ -688,8 +793,9 @@ class TrackpadManager {
             }
             else {
                 if (countByte > this.CurrentFingers) {
+                    settling := A_TickCount - this.StartTime <= this.FingerSettleMs && !this.HasTriggeredSwipe
                     this.CurrentFingers := countByte
-                    this.StartTracking(x, y)
+                    this.StartTracking(x, y, settling)
                 }
                 else if (countByte == this.CurrentFingers) {
                     this.UpdateTracking(x, y)
@@ -708,12 +814,14 @@ class TrackpadManager {
         }
         else if (countByte == 0 || state == 1) {
             this.LastFingers := countByte
+            this.MinSinceLift := 0
             if (this.IsTracking) {
                 SetTimer(this.DebounceTimer, -80)
             }
         }
     }
-    StartTracking(x, y) {
+    ; keep: more fingers joined a touch that just started - same start point, time and movement
+    StartTracking(x, y, keep := false) {
         for handler in this.ActiveHandlers {
             if (handler.Type == "Pan") {
                 handler.OnUp.Call()
@@ -742,19 +850,24 @@ class TrackpadManager {
         if (this.TapCount > 0) {
             SetTimer(this.TapTimerObj, 0)
         }
+        this.Trace("start " this.CurrentFingers " fingers at " Round(x) "," Round(y) (keep ? " (joined the touch)" : "") " handlers=" this.ActiveHandlers.Length)
         this.IsTracking := true
         this.MaxFingers := this.CurrentFingers
-        this.StartMinX := x, this.StartMaxX := x, this.StartMinY := y, this.StartMaxY := y
+        if (!keep)
+            this.StartMinX := x, this.StartMaxX := x, this.StartMinY := y, this.StartMaxY := y
         for id, c in this.Contacts
             this.StartMinX := Min(this.StartMinX, c.x), this.StartMaxX := Max(this.StartMaxX, c.x),
             this.StartMinY := Min(this.StartMinY, c.y), this.StartMaxY := Max(this.StartMaxY, c.y)
         this.LastX := x
         this.LastY := y
-        this.StartX := x
-        this.StartY := y
-        this.StartTime := A_TickCount
-        this.MaxDist := 0
-        this.HasMoved := false
+        if (!keep) {
+            this.MinSinceLift := 99
+            this.StartX := x
+            this.StartY := y
+            this.StartTime := A_TickCount
+            this.MaxDist := 0
+            this.HasMoved := false
+        }
         this.HasTriggeredSwipe := false
         this.ActiveHoldHandler := ""
         if (GetKeyState("Alt", "P")) {
@@ -773,7 +886,7 @@ class TrackpadManager {
                 handler.HasTriggered := false
             } else if (handler.Type == "Hold") {
                 this.ActiveHoldHandler := handler
-                SetTimer(this.HoldTimerObj, -handler.Time)
+                SetTimer(this.HoldTimerObj, -Max(1, handler.Time - (A_TickCount - this.StartTime)))
             }
         }
     }
@@ -811,27 +924,8 @@ class TrackpadManager {
                 }
             }
             else if (handler.Type == "Swipe" && !this.HasTriggeredSwipe && dist > handler.Threshold) {
-                isMatch := false
-                if (Abs(dx) > Abs(dy)) {
-                    if ((handler.Direction == "right" && dx > 0) || (handler.Direction == "left" && dx < 0)) {
-                        isMatch := true
-                    }
-                } else {
-                    if ((handler.Direction == "down" && dy > 0) || (handler.Direction == "up" && dy < 0)) {
-                        isMatch := true
-                    }
-                }
-
-                if (isMatch && handler.HasOwnProp("From") && handler.From == "edge") {
-                    isMatch := this.StartsAtEdge(handler.Direction)
-                } else if (isMatch && this.StartsAtEdge(handler.Direction)) {
-                    for other in this.ActiveHandlers
-                        if (other.Type == "Swipe" && other.HasOwnProp("From") && other.From == "edge" && other.Direction == handler.Direction) {
-                            isMatch := false
-                            break
-                        }
-                }
-                if (isMatch) {
+                if (this.SwipeMatches(handler, dx, dy)) {
+                    this.Trace("SWIPE " handler.Direction " moved " Round(dx) "," Round(dy))
                     handler.HasTriggered := true
                     handler.OnTrigger.Call()
                     this.HasTriggeredSwipe := true
@@ -847,10 +941,24 @@ class TrackpadManager {
             this.ActiveHandlers := []
         }
     }
+    ; does a move of dx, dy go the way this swipe handler wants? (an edge swipe wins over a plain one)
+    SwipeMatches(handler, dx, dy) {
+        isMatch := Abs(dx) > Abs(dy)
+            ? (handler.Direction == "right" && dx > 0) || (handler.Direction == "left" && dx < 0)
+            : (handler.Direction == "down" && dy > 0) || (handler.Direction == "up" && dy < 0)
+        if (isMatch && handler.HasOwnProp("From") && handler.From == "edge")
+            return this.StartsAtEdge(handler.Direction)
+        if (isMatch && this.StartsAtEdge(handler.Direction))
+            for other in this.ActiveHandlers
+                if (other.Type == "Swipe" && other.HasOwnProp("From") && other.From == "edge" && other.Direction == handler.Direction)
+                    return false
+        return isMatch
+    }
     ; No report for WatchdogMs: every finger is up. Clears the finger state even when
     ; no gesture was being tracked, so a later touch with fewer fingers isn't ignored.
     OnWatchdog() {
-        this.Contacts.Clear(), this.FrameLeft := 0
+        this.Trace("pad quiet: every finger up")
+        this.Contacts.Clear(), this.FrameLeft := 0, this.HandDown := false
         SetTimer(this.DebounceTimer, 0)
         this.LastFingers := 0
         if (this.IsTracking)
@@ -873,9 +981,19 @@ class TrackpadManager {
         }
         isTap := false
         maxD := this.MaxFingers * this.TapDistancePerFinger
+        this.Trace("release " this.MaxFingers " fingers: " duration "ms, max distance " Round(this.MaxDist) " (tap under " maxD "), moved " Round(this.LastX - this.StartX) "," Round(this.LastY - this.StartY))
 
         if (!this.HasTriggeredSwipe && duration < this.MaxTapDuration && this.MaxDist < maxD) {
             isTap := true
+        } else if (!this.HasTriggeredSwipe && duration < this.FlickMs) {
+            dx := this.LastX - this.StartX, dy := this.LastY - this.StartY, dist := Sqrt(dx**2 + dy**2)
+            for handler in this.ActiveHandlers
+                if (handler.Type == "Swipe" && dist >= handler.Threshold * this.FlickRatio && this.SwipeMatches(handler, dx, dy)) {
+                    this.Trace("FLICK " handler.Direction)
+                    this.HasTriggeredSwipe := true
+                    handler.OnTrigger.Call()
+                    break
+                }
         }
         if (isTap) {
             maxClicksBound := 0
